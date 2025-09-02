@@ -88,7 +88,7 @@ def rechercher_praticiens():
     time.sleep(5)
 
     # === EXTRACTION DES DONNÉES ===
-    medecins = driver.find_elements(By.CSS_SELECTOR, "div.dl-search-result-presentation")
+    medecins = driver.find_elements(By.CSS_SELECTOR, "div.dl-card")
     results = []
 
     for med in medecins[:nb_max]:
