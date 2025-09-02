@@ -1,5 +1,6 @@
 import time
 import csv
+from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -7,10 +8,14 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options
+
+chrome_options = Options()
+chrome_options.add_argument("--disable-geolocation")
 
 
 def trouver_champ_recherche(wait):
-    """Trouver le champ de recherche Doctolib (plusieurs sélecteurs possibles)."""
+    """Trouver le champ de recherche Doctolib."""
     essais = [
         (By.CSS_SELECTOR, "input[placeholder*='Nom, spécialité, établissement']"),
         (By.CSS_SELECTOR, "input[aria-label*='Rechercher']"),
@@ -23,6 +28,28 @@ def trouver_champ_recherche(wait):
             continue
     raise Exception("Champ de recherche introuvable sur Doctolib")
 
+def trouver_resultats(driver, wait):
+    """
+    Essaie plusieurs sélecteurs pour récupérer les cartes médecins sur Doctolib.
+    Retourne une liste d'éléments WebElement.
+    """
+    essais = [
+        "div.dl-card"  # fallback générique
+    ]
+
+    for sel in essais:
+        try:
+            # On attend max 10s qu'au moins un résultat apparaisse
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+            medecins = driver.find_elements(By.CSS_SELECTOR, sel)
+            if medecins:
+                print(f"✅ {len(medecins)} médecins trouvés avec le sélecteur {sel}")
+                return medecins
+        except:
+            print(f"❌ Aucun élément trouvé avec {sel}")
+
+    print("⚠️ Aucun résultat détecté avec les sélecteurs connus.")
+    return []
 
 def rechercher_praticiens():
     # === PARAMÈTRES UTILISATEUR ===
@@ -30,11 +57,25 @@ def rechercher_praticiens():
     requete = input("Requête médicale (ex: dermatologue, généraliste) : ")
     secteur = input("Type d’assurance (secteur 1, secteur 2, non conventionné) : ")
     consultation = input("Type de consultation (en visio ou sur place) : ")
-    filtre_adresse = input("Filtre géographique (mot-clé dans l’adresse, ex: 75015, Boulogne, rue de Vaugirard) : ")
+    filtre_adresse = input("Filtre géographique (mot-clé dans l’adresse) : ")
+    date_debut = input("Date de début (JJ/MM/AAAA) : ")
+    date_fin = input("Date de fin (JJ/MM/AAAA) : ")
+    prix_min = input("Prix minimum (€) : ")
+    prix_max = input("Prix maximum (€) : ")
+
+    # Transformation des dates
+    try:
+        date_debut = datetime.strptime(date_debut, "%d/%m/%Y")
+        date_fin = datetime.strptime(date_fin, "%d/%m/%Y")
+    except:
+        print("⚠️ Format de date incorrect (JJ/MM/AAAA attendu). Les filtres de dates seront ignorés.")
+        date_debut = date_fin = None
 
     # === INITIALISATION SELENIUM ===
+    chrome_options = Options()
+    chrome_options.add_argument("--disable-geolocation")
     service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
     driver.maximize_window()
     driver.get("https://www.doctolib.fr/")
 
@@ -55,9 +96,17 @@ def rechercher_praticiens():
     search_input.send_keys(requete)
     search_input.send_keys(Keys.ENTER)
 
-    time.sleep(5)  # laisse charger la page
+    localisation_input = wait.until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "input[placeholder*='Où ?']"))
+    )
+    localisation_input.clear()  # supprime la valeur automatique
+    localisation_input.send_keys(filtre_adresse)  # ou ta ville cible
+    localisation_input.send_keys(Keys.ENTER)
+
+    time.sleep(5)  # laisse un peu de temps à la page
 
     # === FILTRES ===
+    # Secteur
     if secteur.lower() == "secteur 1":
         try:
             driver.find_element(By.XPATH, "//span[contains(text(),'Secteur 1')]").click()
@@ -74,6 +123,7 @@ def rechercher_praticiens():
         except:
             pass
 
+    # Consultation
     if consultation.lower() == "en visio":
         try:
             driver.find_element(By.XPATH, "//span[contains(text(),'Téléconsultation')]").click()
@@ -85,60 +135,68 @@ def rechercher_praticiens():
         except:
             pass
 
-    time.sleep(5)
+    # Attente que les cartes soient chargées
+    medecins = trouver_resultats(driver, wait)
+    print("DEBUG: nombre de cartes trouvées =", len(medecins))
 
-    # === EXTRACTION DES DONNÉES ===
-    medecins = driver.find_elements(By.CSS_SELECTOR, "div.dl-card")
     results = []
-
     for med in medecins[:nb_max]:
+        # Nom
         try:
-            nom = med.find_element(By.CSS_SELECTOR, "h2.dl-text").text.strip()
+            nom = med.find_element(By.CSS_SELECTOR, "a[data-testid='practitioner-name']").text.strip()
         except:
             nom = None
 
+        # Disponibilité
         try:
-            dispo = med.find_element(By.CSS_SELECTOR, "div.dl-search-result-availability").text.strip()
+            dispo = med.find_element(By.CSS_SELECTOR, "div[data-testid='next-availability']").text.strip()
         except:
             dispo = "Non disponible"
 
-        try:
-            type_consult = "Téléconsultation" if "Téléconsultation" in med.text else "En cabinet"
-        except:
-            type_consult = None
+        # Type de consultation
+        type_consult = "Téléconsultation" if "téléconsultation" in med.text.lower() else "En cabinet"
 
+        # Secteur d'assurance
         try:
-            secteur_txt = med.find_element(By.CSS_SELECTOR, "div.dl-search-result-speciality").text
-            if "Secteur 1" in secteur_txt:
+            specialite = med.find_element(By.CSS_SELECTOR, "div[data-testid='speciality']").text
+            if "Secteur 1" in specialite:
                 secteur_txt = "1"
-            elif "Secteur 2" in secteur_txt:
+            elif "Secteur 2" in specialite:
                 secteur_txt = "2"
-            else:
+            elif "Non conventionné" in specialite:
                 secteur_txt = "Non conventionné"
+            else:
+                secteur_txt = None
         except:
             secteur_txt = None
 
+        # Prix
         try:
-            prix = med.find_element(By.XPATH, ".//span[contains(text(),'€')]").text
+            prix = None
+            for sp in med.find_elements(By.TAG_NAME, "span"):
+                if "€" in sp.text:
+                    prix = sp.text.strip()
+                    break
         except:
             prix = None
 
+        # Adresse
         try:
-            adresse = med.find_element(By.CSS_SELECTOR, "div.dl-text").text.split("\n")
-            rue, code_postal, ville = None, None, None
-            if adresse:
-                rue = adresse[0]
-            if len(adresse) > 1:
-                parts = adresse[1].split()
-                if parts:
-                    code_postal = parts[0]
-                    ville = " ".join(parts[1:])
+            adresse_txt = med.find_element(By.CSS_SELECTOR, "div[data-testid='address']").text.split("\n")
+            rue = adresse_txt[0] if adresse_txt else None
+            code_postal, ville = None, None
+            if len(adresse_txt) > 1:
+                parts = adresse_txt[1].split()
+                code_postal = parts[0]
+                ville = " ".join(parts[1:])
         except:
-            rue, code_postal, ville = None, None, None
+            rue = code_postal = ville = None
 
-        # Filtrer par adresse
-        if filtre_adresse and filtre_adresse.lower() not in (rue or "").lower() and filtre_adresse.lower() not in (ville or "").lower():
-            continue
+        # Filtre adresse
+        if filtre_adresse:
+            texte_adresse = " ".join([rue or "", ville or ""]).lower()
+            if filtre_adresse.lower() not in texte_adresse:
+                continue
 
         results.append({
             "Nom": nom,
@@ -150,6 +208,10 @@ def rechercher_praticiens():
             "Code postal": code_postal,
             "Ville": ville,
         })
+
+        print(f"DEBUG: Médecin {nom} → adresse trouvée = {rue}, {ville}")
+
+
 
     # === SAUVEGARDE CSV ===
     if results:
