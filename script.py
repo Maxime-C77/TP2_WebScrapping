@@ -9,10 +9,70 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
+from urllib.parse import urljoin
 
 chrome_options = Options()
 chrome_options.add_argument("--disable-geolocation")
 
+BASE_URL = "https://www.doctolib.fr"
+
+def trouver_url_fiche(med):
+    """
+    Retourne l'URL (absolue ou relative) de la fiche praticien depuis une carte résultat.
+    Essaie plusieurs sélecteurs / stratégies.
+    """
+    # 1) Sélecteurs les plus stables
+    selecteurs = [
+        "a[data-testid='practitioner-name']",
+        "a[data-test-id='search-result-card-practitioner-name']",
+        "a[href*='/medecin/']",
+        "a[href*='/sante/']",
+        "a[href*='/centre-']",
+        "a[href^='/']",
+        "a[href^='/doctors/généraliste/torcy']",
+        "a[href^='/cabinet-medical']",
+    ]
+    for sel in selecteurs:
+        try:
+            a = med.find_element(By.CSS_SELECTOR, sel)
+            href = a.get_attribute("href") or a.get_attribute("data-href")
+            if href and not href.startswith("javascript"):
+                return href
+        except:
+            pass
+
+    # 2) Un lien qui entoure un titre (h2/h3)
+    try:
+        a = med.find_element(By.XPATH, ".//a[.//h1 or .//h2 or .//h3]")
+        href = a.get_attribute("href")
+        if href:
+            return href
+    except:
+        pass
+
+    # 3) Dernier recours : premier <a> “pertinent” dans la carte
+    for a in med.find_elements(By.TAG_NAME, "a"):
+        href = a.get_attribute("href") or ""
+        if href and not href.startswith("javascript:"):
+            if "/medecin/" in href or "/sante/" in href or href.startswith("/"):
+                return href
+
+    return None
+
+
+def ouvrir_fiche_nouvel_onglet(driver, wait, href):
+    """
+    Ouvre la fiche dans un nouvel onglet, attend le chargement et bascule dessus.
+    Retourne True si ok, False sinon.
+    """
+    url = urljoin(BASE_URL, href)  # gère les URLs relatives
+    driver.execute_script("window.open(arguments[0], '_blank');", url)
+    driver.switch_to.window(driver.window_handles[-1])
+    try:
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "h1")))
+        return True
+    except:
+        return False
 
 def trouver_champ_recherche(wait):
     """Trouver le champ de recherche Doctolib."""
@@ -79,7 +139,7 @@ def rechercher_praticiens():
     driver.maximize_window()
     driver.get("https://www.doctolib.fr/")
 
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 30)
 
     # Gestion des cookies
     try:
@@ -96,12 +156,19 @@ def rechercher_praticiens():
     search_input.send_keys(requete)
     search_input.send_keys(Keys.ENTER)
 
-    localisation_input = wait.until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "input[placeholder*='Où ?']"))
-    )
-    localisation_input.clear()  # supprime la valeur automatique
-    localisation_input.send_keys(filtre_adresse)  # ou ta ville cible
-    localisation_input.send_keys(Keys.ENTER)
+    # try:
+    #     localisation_input = wait.until(
+    #         EC.presence_of_element_located((By.CSS_SELECTOR, "input[data-testid='search-bar-location-input']"))
+    #     )
+    #     localisation_input.clear()  # supprime la valeur automatique
+    #     time.sleep(2)
+    #     localisation_input.send_keys(filtre_adresse)  # ou ta ville cible
+    #     time.sleep(2)
+    #     localisation_input.send_keys(Keys.DOWN)
+    #     time.sleep(2)
+    #     localisation_input.send_keys(Keys.ENTER)
+    # except:
+    #     print("⚠️ Impossible de saisir la localisation, la valeur par défaut sera utilisée.")
 
     time.sleep(5)  # laisse un peu de temps à la page
 
@@ -141,77 +208,92 @@ def rechercher_praticiens():
 
     results = []
     for med in medecins[:nb_max]:
-        # Nom
         try:
-            nom = med.find_element(By.CSS_SELECTOR, "a[data-testid='practitioner-name']").text.strip()
-        except:
-            nom = None
-
-        # Disponibilité
-        try:
-            dispo = med.find_element(By.CSS_SELECTOR, "div[data-testid='next-availability']").text.strip()
-        except:
-            dispo = "Non disponible"
-
-        # Type de consultation
-        type_consult = "Téléconsultation" if "téléconsultation" in med.text.lower() else "En cabinet"
-
-        # Secteur d'assurance
-        try:
-            specialite = med.find_element(By.CSS_SELECTOR, "div[data-testid='speciality']").text
-            if "Secteur 1" in specialite:
-                secteur_txt = "1"
-            elif "Secteur 2" in specialite:
-                secteur_txt = "2"
-            elif "Non conventionné" in specialite:
-                secteur_txt = "Non conventionné"
-            else:
-                secteur_txt = None
-        except:
-            secteur_txt = None
-
-        # Prix
-        try:
-            prix = None
-            for sp in med.find_elements(By.TAG_NAME, "span"):
-                if "€" in sp.text:
-                    prix = sp.text.strip()
-                    break
-        except:
-            prix = None
-
-        # Adresse
-        try:
-            adresse_txt = med.find_element(By.CSS_SELECTOR, "div[data-testid='address']").text.split("\n")
-            rue = adresse_txt[0] if adresse_txt else None
-            code_postal, ville = None, None
-            if len(adresse_txt) > 1:
-                parts = adresse_txt[1].split()
-                code_postal = parts[0]
-                ville = " ".join(parts[1:])
-        except:
-            rue = code_postal = ville = None
-
-        # Filtre adresse
-        if filtre_adresse:
-            texte_adresse = " ".join([rue or "", ville or ""]).lower()
-            if filtre_adresse.lower() not in texte_adresse:
+            href = trouver_url_fiche(med)
+            if not href:
+                print("⚠️ Aucun lien de fiche détecté pour cette carte. On passe.")
                 continue
 
-        results.append({
-            "Nom": nom,
-            "Disponibilité": dispo,
-            "Consultation": type_consult,
-            "Secteur": secteur_txt,
-            "Prix": prix,
-            "Rue": rue,
-            "Code postal": code_postal,
-            "Ville": ville,
-        })
+            if not ouvrir_fiche_nouvel_onglet(driver, wait, href):
+                print(f"⚠️ Échec d'ouverture ou de chargement pour {href}")
+                # ferme l’onglet s'il a été ouvert mais n'a pas chargé
+                if len(driver.window_handles) > 1:
+                    driver.close()
+                    driver.switch_to.window(driver.window_handles[0])
+                continue
 
-        print(f"DEBUG: Médecin {nom} → adresse trouvée = {rue}, {ville}")
+            # ---------- Extraction détaillée sur la fiche ----------
+            try:
+                nom = driver.find_element(By.CSS_SELECTOR, "h1").text.strip()
+            except:
+                nom = None
 
+            try:
+                dispo = driver.find_element(By.CSS_SELECTOR, "div[data-testid='next-availability']").text.strip()
+            except:
+                dispo = "Non disponible"
 
+            try:
+                specialite = driver.find_element(By.CSS_SELECTOR, "div[data-testid='speciality']").text
+            except:
+                specialite = None
+
+            # Secteur
+            if specialite:
+                if "Secteur 1" in specialite:
+                    secteur_txt = "1"
+                elif "Secteur 2" in specialite:
+                    secteur_txt = "2"
+                elif "Non conventionné" in specialite:
+                    secteur_txt = "Non conventionné"
+                else:
+                    secteur_txt = None
+            else:
+                secteur_txt = None
+
+            # Adresse
+            try:
+                adresse_txt = driver.find_element(By.CSS_SELECTOR, "div[data-testid='address']").text.split("\n")
+                rue = adresse_txt[0] if adresse_txt else None
+                code_postal, ville = None, None
+                if len(adresse_txt) > 1:
+                    parts = adresse_txt[1].split()
+                    code_postal = parts[0]
+                    ville = " ".join(parts[1:])
+            except:
+                rue = code_postal = ville = None
+
+            # Prix : on scanne les spans pour trouver un montant
+            prix = None
+            try:
+                for sp in driver.find_elements(By.TAG_NAME, "span"):
+                    text = sp.text.strip()
+                    if "€" in text and any(ch.isdigit() for ch in text):
+                        prix = text
+                        break
+            except:
+                prix = None
+
+            results.append({
+                "Nom": nom,
+                "Disponibilité": dispo,
+                "Consultation": "Téléconsultation" if "téléconsultation" in driver.page_source.lower() else "En cabinet",
+                "Secteur": secteur_txt,
+                "Prix": prix,
+                "Rue": rue,
+                "Code postal": code_postal,
+                "Ville": ville,
+            })
+            print(f"✅ Médecin {nom} enregistré depuis la fiche")
+
+        except Exception as e:
+            print("⚠️ Erreur lors du traitement :", e)
+
+        finally:
+            # Fermer l’onglet fiche (si ouvert) et revenir à la liste
+            if len(driver.window_handles) > 1:
+                driver.close()
+                driver.switch_to.window(driver.window_handles[0])
 
     # === SAUVEGARDE CSV ===
     if results:
