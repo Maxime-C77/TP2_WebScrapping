@@ -10,11 +10,11 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 
 def trouver_champ_recherche(wait):
-    # Tente plusieurs sélecteurs possibles
+    """Trouver le champ de recherche Doctolib (plusieurs sélecteurs possibles)."""
     essais = [
-        (By.ID, "searchbar-input"),
-        (By.CSS_SELECTOR, "input.searchbar-input.searchbar-place-input"),
-        (By.CSS_SELECTOR, "input[placeholder*='Nom, spécialité, établissement,...']")
+        (By.CSS_SELECTOR, "input[placeholder*='Nom, spécialité, établissement']"),
+        (By.CSS_SELECTOR, "input[aria-label*='Rechercher']"),
+        (By.TAG_NAME, "input"),
     ]
     for by, sel in essais:
         try:
@@ -23,8 +23,9 @@ def trouver_champ_recherche(wait):
             continue
     raise Exception("Champ de recherche introuvable sur Doctolib")
 
+
 def rechercher_praticiens():
-    # === PARAMÈTRES UTILISATEUR (saisis au clavier) ===
+    # === PARAMÈTRES UTILISATEUR ===
     nb_max = int(input("Nombre de résultats maximum à afficher : "))
     requete = input("Requête médicale (ex: dermatologue, généraliste) : ")
     secteur = input("Type d’assurance (secteur 1, secteur 2, non conventionné) : ")
@@ -48,20 +49,15 @@ def rechercher_praticiens():
     except:
         pass
 
-    # Recherche
     # === RECHERCHE ===
-    search_input = wait.until(
-        EC.presence_of_element_located((By.ID, ":r1:"))
-    )
     search_input = trouver_champ_recherche(wait)
     search_input.clear()
     search_input.send_keys(requete)
     search_input.send_keys(Keys.ENTER)
 
-    time.sleep(3)
+    time.sleep(5)  # laisse charger la page
 
     # === FILTRES ===
-    # Filtrer par secteur
     if secteur.lower() == "secteur 1":
         try:
             driver.find_element(By.XPATH, "//span[contains(text(),'Secteur 1')]").click()
@@ -78,7 +74,6 @@ def rechercher_praticiens():
         except:
             pass
 
-    # Filtrer par type de consultation
     if consultation.lower() == "en visio":
         try:
             driver.find_element(By.XPATH, "//span[contains(text(),'Téléconsultation')]").click()
@@ -98,25 +93,21 @@ def rechercher_praticiens():
 
     for med in medecins[:nb_max]:
         try:
-            # Nom complet
-            nom = med.find_element(By.CSS_SELECTOR, "a.dl-search-result-name").text.strip()
+            nom = med.find_element(By.CSS_SELECTOR, "h2.dl-text").text.strip()
         except:
             nom = None
 
         try:
-            # Prochaine disponibilité
             dispo = med.find_element(By.CSS_SELECTOR, "div.dl-search-result-availability").text.strip()
         except:
             dispo = "Non disponible"
 
         try:
-            # Type consultation
             type_consult = "Téléconsultation" if "Téléconsultation" in med.text else "En cabinet"
         except:
             type_consult = None
 
         try:
-            # Secteur d’assurance
             secteur_txt = med.find_element(By.CSS_SELECTOR, "div.dl-search-result-speciality").text
             if "Secteur 1" in secteur_txt:
                 secteur_txt = "1"
@@ -128,14 +119,12 @@ def rechercher_praticiens():
             secteur_txt = None
 
         try:
-            # Prix (si indiqué)
             prix = med.find_element(By.XPATH, ".//span[contains(text(),'€')]").text
         except:
             prix = None
 
         try:
-            # Adresse complète
-            adresse = med.find_element(By.CSS_SELECTOR, "input.searchbar-input.searchbar-place-input").text.split("\n")
+            adresse = med.find_element(By.CSS_SELECTOR, "div.dl-text").text.split("\n")
             rue, code_postal, ville = None, None, None
             if adresse:
                 rue = adresse[0]
@@ -147,7 +136,7 @@ def rechercher_praticiens():
         except:
             rue, code_postal, ville = None, None, None
 
-        # Vérifier si l’adresse correspond au filtre
+        # Filtrer par adresse
         if filtre_adresse and filtre_adresse.lower() not in (rue or "").lower() and filtre_adresse.lower() not in (ville or "").lower():
             continue
 
